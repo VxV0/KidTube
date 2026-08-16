@@ -4,10 +4,11 @@ import 'package:provider/provider.dart';
 import 'providers/app_provider.dart';
 import 'screens/main_shell.dart';
 import 'utils/constants.dart';
+import 'package:media_kit/media_kit.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
+  MediaKit.ensureInitialized(); // ADD THIS
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
