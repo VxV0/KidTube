@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:video_player/video_player.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:provider/provider.dart';
 import 'package:timeago/timeago.dart' as timeago;
@@ -18,11 +19,11 @@ class VideoPlayerScreen extends StatefulWidget {
 }
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
-  VideoPlayerController? _controller;
+  late final Player _player;
+  late final VideoController _videoController;
   bool _titleExpanded = false;
   bool _isLoading = true;
   bool _hasError = false;
-  bool _showControls = true;
   final YoutubeExplode _yt = YoutubeExplode();
   List<Map<String, dynamic>> _qualityLinks = [];
   int _currentQuality = 0;
@@ -30,12 +31,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   @override
   void initState() {
     super.initState();
+    _player = Player();
+    _videoController = VideoController(_player);
     _loadVideo();
   }
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _player?.dispose();
     _yt.close();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     super.dispose();
@@ -47,13 +50,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       final manifest = await _yt.videos.streamsClient
           .getManifest(widget.video.youtubeVideoId);
 
-      final muxed = manifest.muxed.toList();
-      muxed.sort((a, b) =>
-          a.videoResolution.height.compareTo(b.videoResolution.height));
+      // Adaptive video streams — gives 144p, 240p, 360p, 480p, 720p, 1080p
+      final videoStreams = manifest.videoOnly
+        .where((s) => s.codec.mimeType.contains('mp4'))
+        .toList();
+      videoStreams.sort((a, b) =>
+        a.videoResolution.height.compareTo(b.videoResolution.height));
 
-      _qualityLinks = muxed.map((s) => {
+      // Best audio stream
+      final audioStreams = manifest.audioOnly
+        .where((s) => s.codec.mimeType.contains('mp4'))
+        .toList();
+      audioStreams.sort((a, b) => b.bitrate.compareTo(a.bitrate));
+      final bestAudio = audioStreams.first;
+
+      _qualityLinks = videoStreams.map((s) => {
         'height': s.videoResolution.height,
-        'url': s.url.toString(),
+        'videoUrl': s.url.toString(),
+        'audioUrl': bestAudio.url.toString(),
       }).toList();
 
       if (_qualityLinks.isEmpty) {
@@ -64,6 +78,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       final provider = context.read<AppProvider>();
       final saved = provider.videoQuality;
       int targetHeight;
+
 
       if (saved == 'auto') {
         targetHeight = _pickDefaultQuality();
@@ -98,17 +113,24 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
 
   Future<void> _playAtIndex(int index) async {
     final q = _qualityLinks[index];
-    final position = _controller?.value.position ?? Duration.zero;
-    await _controller?.dispose();
+    final position = _player.state.position;
+    await _player.open(
+      Media(q['videoUrl'] as String),
+      play: false,
+    );
 
-    final controller = VideoPlayerController.networkUrl(
-        Uri.parse(q['url'] as String));
-    await controller.initialize();
-    if (position.inSeconds > 0) await controller.seekTo(position);
-    controller.play();
+    // Also open audio track
+    await _player.setAudioTrack(
+      AudioTrack.uri(q['audioUrl'] as String),
+    );
+
+    if (position.inSeconds > 0) {
+      await _player.seek(position);
+    }
+
+    await _player.play();
 
     setState(() {
-      _controller = controller;
       _currentQuality = q['height'] as int;
       _isLoading = false;
     });
@@ -238,49 +260,10 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                         ),
                       ],
                     ))
-                : GestureDetector(
-                    onTap: () => setState(() => _showControls = !_showControls),
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        VideoPlayer(_controller!),
-                        Positioned(
-                          bottom: 0, left: 0, right: 0,
-                          child: VideoProgressIndicator(
-                            _controller!,
-                            allowScrubbing: true,
-                            colors: const VideoProgressColors(
-                              playedColor: AppColors.ytRed,
-                              bufferedColor: Colors.white24,
-                              backgroundColor: Colors.white12,
-                            ),
-                          ),
-                        ),
-                        if (_showControls)
-                          GestureDetector(
-                            onTap: () => setState(() {
-                              _controller!.value.isPlaying
-                                  ? _controller!.pause()
-                                  : _controller!.play();
-                            }),
-                            child: Container(
-                              width: 56, height: 56,
-                              decoration: const BoxDecoration(
-                                color: Colors.black54,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
-                                _controller!.value.isPlaying
-                                    ? Icons.pause
-                                    : Icons.play_arrow,
-                                color: Colors.white,
-                                size: 32,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
+                : Video(
+                  controller: _videoController,
+                  controls: AdaptiveVideoControls,
+                ),
       ),
     );
   }
