@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:video_player/video_player.dart';
+import 'package:better_player/better_player.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:provider/provider.dart';
 import 'package:timeago/timeago.dart' as timeago;
@@ -19,23 +19,18 @@ class VideoPlayerScreen extends StatefulWidget {
 }
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
-  VideoPlayerController? _controller;
+  BetterPlayerController? _betterController;
   bool _titleExpanded = false;
   bool _isLoading = true;
   bool _hasError = false;
-  String _errorMessage = '';
-  bool _showControls = true;
-
-  // Streams fetched from youtube_explode
-  List<MuxedStreamInfo> _streams = [];
-  MuxedStreamInfo? _currentStream;
-
   final YoutubeExplode _yt = YoutubeExplode();
+  List<Map<String, dynamic>> _qualityLinks = [];
+  int _currentQuality = 0;
 
   @override
   void initState() {
     super.initState();
-    _loadStreams();
+    _loadVideo();
   }
 
   Future<void> _loadStreams() async {
@@ -205,7 +200,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _betterController?.dispose();
     _yt.close();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     super.dispose();
@@ -328,7 +323,189 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       ),
     );
   }
+  Future<void> _loadVideo() async {
+    setState(() { _isLoading = true; _hasError = false; });
 
+    try {
+      final manifest = await _yt.videos.streamsClient
+          .getManifest(widget.video.youtubeVideoId);
+
+      // Get all adaptive video streams
+      final videoStreams = manifest.videoOnly
+          .where((s) => s.codec.mimeType.contains('mp4'))
+          .toList();
+      videoStreams.sort((a, b) =>
+          a.videoResolution.height.compareTo(b.videoResolution.height));
+
+      // Get best audio stream
+      final audioStream = manifest.audioOnly
+          .where((s) => s.codec.mimeType.contains('mp4'))
+          .reduce((a, b) => a.bitrate > b.bitrate ? a : b);
+
+      // Build quality map
+      _qualityLinks = videoStreams.map((s) => {
+        'height': s.videoResolution.height,
+        'videoUrl': s.url.toString(),
+        'audioUrl': audioStream.url.toString(),
+      }).toList();
+
+      if (_qualityLinks.isEmpty) {
+        setState(() { _hasError = true; _isLoading = false; });
+        return;
+      }
+
+      // Pick default quality: prefer 240p, else 144p, else 360p, else highest
+      final provider = context.read<AppProvider>();
+      final savedQuality = provider.videoQuality;
+      int targetHeight;
+
+      if (savedQuality == 'auto') {
+        targetHeight = _pickDefaultQuality();
+      } else {
+        targetHeight = int.tryParse(savedQuality) ?? _pickDefaultQuality();
+      }
+
+      final index = _findBestQualityIndex(targetHeight);
+      await _playAtIndex(index);
+
+    } catch (e) {
+      setState(() { _hasError = true; _isLoading = false; });
+    }
+  }
+
+  int _pickDefaultQuality() {
+    final heights = _qualityLinks.map((q) => q['height'] as int).toList();
+    // Priority: 240p → 144p → 360p → whatever is lowest
+    for (final preferred in [240, 144, 360]) {
+      if (heights.contains(preferred)) return preferred;
+    }
+    return heights.first;
+  }
+
+  int _findBestQualityIndex(int targetHeight) {
+    final heights = _qualityLinks.map((q) => q['height'] as int).toList();
+    // Find exact match
+    final exact = heights.indexOf(targetHeight);
+    if (exact != -1) return exact;
+    // Find closest below
+    final below = heights.where((h) => h <= targetHeight).toList();
+    if (below.isNotEmpty) {
+      return heights.indexOf(below.last);
+    }
+    // Fallback to lowest
+    return 0;
+  }
+
+  Future<void> _playAtIndex(int index) async {
+    final q = _qualityLinks[index];
+    final position = await _betterController
+        ?.videoPlayerController?.position ?? Duration.zero;
+
+    _betterController?.dispose();
+
+    final dataSource = BetterPlayerDataSource(
+      BetterPlayerDataSourceType.network,
+      q['videoUrl'] as String,
+      videoExtension: 'mp4',
+      liveStream: false,
+    );
+
+    final controller = BetterPlayerController(
+      BetterPlayerConfiguration(
+        autoPlay: true,
+        looping: false,
+        aspectRatio: 16 / 9,
+        controlsConfiguration: BetterPlayerControlsConfiguration(
+          progressBarPlayedColor: AppColors.ytRed,
+          progressBarHandleColor: AppColors.ytRed,
+          progressBarBufferedColor: Colors.white24,
+          progressBarBackgroundColor: Colors.white12,
+          iconsColor: Colors.white,
+          controlBarColor: Colors.black54,
+        ),
+      ),
+      betterPlayerDataSource: dataSource,
+    );
+
+    await controller.videoPlayerController?.initialize();
+    if (position.inSeconds > 0) {
+      await controller.seekTo(position);
+    }
+
+    setState(() {
+      _betterController = controller;
+      _currentQuality = q['height'] as int;
+      _isLoading = false;
+    });
+
+    // Save quality preference
+    context.read<AppProvider>().setVideoQuality(_currentQuality.toString());
+  }
+
+  void _showQualitySelector(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF212121),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 12),
+          Container(
+            width: 40, height: 4,
+            decoration: BoxDecoration(
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('Video quality',
+              style: TextStyle(color: Colors.white, fontSize: 16,
+                  fontWeight: FontWeight.w600)),
+          ),
+          const Divider(color: Colors.white12, height: 1),
+          ..._qualityLinks.reversed.map((q) {
+            final height = q['height'] as int;
+            final isSelected = height == _currentQuality;
+            return ListTile(
+              leading: Icon(
+                isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                color: isSelected ? AppColors.ytRed : Colors.white54,
+                size: 20,
+              ),
+              title: Text('${height}p',
+                style: TextStyle(
+                  color: isSelected ? Colors.white : Colors.white70,
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+                )),
+              trailing: height <= 240
+                ? Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.green.withOpacity(0.5)),
+                    ),
+                    child: const Text('Saves data',
+                      style: TextStyle(color: Colors.green, fontSize: 10)),
+                  )
+                : null,
+              onTap: () async {
+                Navigator.pop(context);
+                final index = _qualityLinks.indexWhere(
+                    (q) => q['height'] == height);
+                if (index != -1) await _playAtIndex(index);
+              },
+            );
+          }),
+          const SizedBox(height: 16),
+        ],
+      ),
+    );
+  }
   Widget _buildTitleSection() {
     return GestureDetector(
       onTap: () => setState(() => _titleExpanded = !_titleExpanded),
