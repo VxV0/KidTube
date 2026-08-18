@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:media_kit_video/media_kit_video.dart' as mkv;
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:provider/provider.dart';
 import 'package:timeago/timeago.dart' as timeago;
@@ -20,7 +20,7 @@ class VideoPlayerScreen extends StatefulWidget {
 
 class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   late final Player _player;
-  late final VideoController _videoController;
+  late final mkv.VideoController _videoController;
   bool _titleExpanded = false;
   bool _isLoading = true;
   bool _hasError = false;
@@ -32,7 +32,7 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   void initState() {
     super.initState();
     _player = Player();
-    _videoController = VideoController(_player);
+    _videoController = mkv.VideoController(_player);
     _loadVideo();
   }
 
@@ -50,24 +50,14 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
       final manifest = await _yt.videos.streamsClient
           .getManifest(widget.video.youtubeVideoId);
 
-      // Adaptive video streams — gives 144p, 240p, 360p, 480p, 720p, 1080p
-      final videoStreams = manifest.videoOnly
-        .where((s) => s.codec.mimeType.contains('mp4'))
-        .toList();
-      videoStreams.sort((a, b) =>
-        a.videoResolution.height.compareTo(b.videoResolution.height));
+      // Use muxed streams - more reliable
+      final muxed = manifest.muxed.toList();
+      muxed.sort((a, b) =>
+          a.videoResolution.height.compareTo(b.videoResolution.height));
 
-      // Best audio stream
-      final audioStreams = manifest.audioOnly
-        .where((s) => s.codec.mimeType.contains('mp4'))
-        .toList();
-      audioStreams.sort((a, b) => b.bitrate.compareTo(a.bitrate));
-      final bestAudio = audioStreams.first;
-
-      _qualityLinks = videoStreams.map((s) => {
+      _qualityLinks = muxed.map((s) => {
         'height': s.videoResolution.height,
-        'videoUrl': s.url.toString(),
-        'audioUrl': bestAudio.url.toString(),
+        'url': s.url.toString(),
       }).toList();
 
       if (_qualityLinks.isEmpty) {
@@ -77,17 +67,11 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
 
       final provider = context.read<AppProvider>();
       final saved = provider.videoQuality;
-      int targetHeight;
+      int targetHeight = saved == 'auto'
+          ? _pickDefaultQuality()
+          : int.tryParse(saved) ?? _pickDefaultQuality();
 
-
-      if (saved == 'auto') {
-        targetHeight = _pickDefaultQuality();
-      } else {
-        targetHeight = int.tryParse(saved) ?? _pickDefaultQuality();
-      }
-
-      final index = _findBestIndex(targetHeight);
-      await _playAtIndex(index);
+      await _playAtIndex(_findBestIndex(targetHeight));
 
     } catch (e) {
       setState(() { _hasError = true; _isLoading = false; });
@@ -114,21 +98,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   Future<void> _playAtIndex(int index) async {
     final q = _qualityLinks[index];
     final position = _player.state.position;
-    await _player.open(
-      Media(q['videoUrl'] as String),
-      play: false,
-    );
 
-    // Also open audio track
-    await _player.setAudioTrack(
-      AudioTrack.uri(q['audioUrl'] as String),
+    setState(() => _isLoading = true);
+
+    await _player.open(
+      Media(q['url'] as String),
+      play: true,
     );
 
     if (position.inSeconds > 0) {
       await _player.seek(position);
     }
-
-    await _player.play();
 
     setState(() {
       _currentQuality = q['height'] as int;
@@ -260,9 +240,9 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
                         ),
                       ],
                     ))
-                : Video(
+                : mkv.Video(
                   controller: _videoController,
-                  controls: AdaptiveVideoControls,
+                  controls: mkv.AdaptiveVideoControls,
                 ),
       ),
     );
